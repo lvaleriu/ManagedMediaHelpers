@@ -11,7 +11,18 @@
 // </copyright>
 //-----------------------------------------------------------------------
 
-[module: System.Diagnostics.CodeAnalysis.SuppressMessage("Microsoft.Naming",
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
+using System.IO;
+using System.Security.Cryptography;
+using System.Threading;
+using System.Windows.Media;
+using MediaParsers;
+
+[module: SuppressMessage("Microsoft.Naming",
     "CA1709:IdentifiersShouldBeCasedCorrectly",
     Scope = "type",
     Target = "Media.Mp3MediaStreamSource",
@@ -30,17 +41,6 @@
 
 namespace Media
 {
-    using System;
-    using System.Collections.Generic;
-    using System.Diagnostics;
-    using System.Globalization;
-    using System.IO;
-    using System.Security.Cryptography;
-    using System.Threading;
-    using System.Windows.Media;
-    
-    using MediaParsers;
-
     /// <summary>
     /// A Simple MediaStreamSource which can play back MP3 streams from
     /// beginning to end.
@@ -56,12 +56,17 @@ namespace Media
         /// <summary>
         /// Buffer for decoding audio frames into.  4096 should be larger than we'll ever need, right? (144*448*1000/44100)
         /// </summary>
-        private static byte[] buffer = new byte[4096];
+        private static readonly byte[] buffer = new byte[4096];
 
-         /// <summary>
+        /// <summary>
         /// The Mp3 stream being played back.
         /// </summary>
-        private Stream audioStream;
+        private readonly Stream audioStream;
+
+        /// <summary>
+        /// The length of the audiostream as determined via the constructors.
+        /// </summary>
+        private readonly long audioStreamLength;
 
         /// <summary>
         /// Description of the Mp3 Stream being played back which includes the
@@ -71,6 +76,11 @@ namespace Media
         private MediaStreamDescription audioStreamDescription;
 
         /// <summary>
+        /// The current frame to parse
+        /// </summary>
+        private MpegFrame currentFrame;
+
+        /// <summary>
         /// The position in the stream where the current MpegFrame starts.
         /// For purposes of this code, the frame starts with the header and
         /// not after the header.
@@ -78,19 +88,26 @@ namespace Media
         private long currentFrameStartPosition;
 
         /// <summary>
-        /// The length of the audiostream as determined via the constructors.
-        /// </summary>
-        private long audioStreamLength;
-
-        /// <summary>
         /// Holds the duration of the track
         /// </summary>
         private TimeSpan trackDuration;
+        public TimeSpan TrackDuration { get { return trackDuration; } }
 
-        /// <summary>
-        /// The current frame to parse
-        /// </summary>
-        private MpegFrame currentFrame;
+        private long _headerPosition;
+
+        private TimeSpan _Position;
+        public TimeSpan Position
+        {
+            get { return _Position; }
+            set
+            {
+                //if (currentFrame != null)
+                //{
+                //    currentFrameStartPosition = MpegFrame.FrameHeaderSize + (long)Math.Round(value.TotalSeconds / 8 * currentFrame.Bitrate);
+                //    _Position = value;
+                //}
+            }
+        }
 
         /// <summary>
         /// Initializes a new instance of the Mp3MediaStreamSource class.
@@ -101,7 +118,7 @@ namespace Media
         public Mp3MediaStreamSource(Stream audioStream)
         {
             this.audioStream = audioStream;
-            this.audioStreamLength = audioStream.Length;
+            audioStreamLength = audioStream.Length;
         }
 
         /// <summary>
@@ -115,7 +132,7 @@ namespace Media
         public Mp3MediaStreamSource(Stream audioStream, long length)
         {
             this.audioStream = audioStream;
-            this.audioStreamLength = length;
+            audioStreamLength = length;
         }
 
         /// <summary>
@@ -134,6 +151,7 @@ namespace Media
         /// </param>
         public void ReadPastId3V2Tags(Action<MpegFrame> callback)
         {
+            Debug.WriteLine("ReadPastId3V2Tags");
             /* 
              * Since this code assumes that the first bit of data is either an ID3 segment or an MPEG segment it could
              * get into trouble. Should probably do something a bit more robust at some point.
@@ -142,18 +160,18 @@ namespace Media
             MpegFrame mpegFrame;
 
             // Read and (throw out) any Id3 data if present. 
-            byte[] data = new byte[10];
-            if (this.audioStream.Read(data, 0, 3) != 3)
+            var data = new byte[10];
+            if (audioStream.Read(data, 0, 3) != 3)
             {
                 goto cleanup;
             }
 
-            if (data[0] == 73 /* I */ &&
-                data[1] == 68 /* D */ &&
+            if (data[0] == 73 /* I */&&
+                data[1] == 68 /* D */&&
                 data[2] == 51 /* 3 */)
             {
                 // Need to update to read the is footer present flag and account for its 10 bytes if needed.
-                if (this.audioStream.Read(data, 3, 7) != 7)
+                if (audioStream.Read(data, 3, 7) != 7)
                 {
                     goto cleanup;
                 }
@@ -167,12 +185,12 @@ namespace Media
                                                      while (id3Size > 0)
                                                      {
                                                          bytesRead = (id3Size - buffer.Length > 0)
-                                                            ? this.audioStream.Read(buffer, 0, buffer.Length)
-                                                            : this.audioStream.Read(buffer, 0, id3Size);
+                                                                         ? audioStream.Read(buffer, 0, buffer.Length)
+                                                                         : audioStream.Read(buffer, 0, id3Size);
                                                          id3Size -= bytesRead;
                                                      }
 
-                                                     mpegFrame = new MpegFrame(this.audioStream);
+                                                     mpegFrame = new MpegFrame(audioStream);
                                                      callback(mpegFrame);
                                                  });
             }
@@ -180,21 +198,23 @@ namespace Media
             {
                 // No ID3 tag present, presumably this is streaming and we are starting right at the Mp3 data.
                 // Assume the stream isn't seekable.
-                if (this.audioStream.Read(data, 3, 1) != 1)
+                if (audioStream.Read(data, 3, 1) != 1)
                 {
                     goto cleanup;
                 }
 
-                mpegFrame = new MpegFrame(this.audioStream, data);
+                mpegFrame = new MpegFrame(audioStream, data);
                 callback(mpegFrame);
             }
 
             return;
 
             // Cleanup and quit if you couldn't even read the initial data for some reason.
-        cleanup:
+            cleanup:
             throw new Exception("Could not read intial audio stream data");
         }
+
+        
 
         /// <summary>
         /// Parses the passed in MediaStream to find the first frame and signals
@@ -203,12 +223,17 @@ namespace Media
         /// </summary>
         protected override void OpenMediaAsync()
         {
-            // Initialize data structures to pass to the Media pipeline via the MediaStreamSource
-            Dictionary<MediaSourceAttributesKeys, string> mediaSourceAttributes = new Dictionary<MediaSourceAttributesKeys, string>();
-            Dictionary<MediaStreamAttributeKeys, string> mediaStreamAttributes = new Dictionary<MediaStreamAttributeKeys, string>();
-            List<MediaStreamDescription> mediaStreamDescriptions = new List<MediaStreamDescription>();
+            Debug.WriteLine("OpenMediaAsync");
 
-            this.ReadPastId3V2Tags(mpegLayer3Frame => this.ReadPastId3v2TagsCallback(mpegLayer3Frame, mediaStreamAttributes, mediaStreamDescriptions, mediaSourceAttributes));           
+            // Initialize data structures to pass to the Media pipeline via the MediaStreamSource
+            var mediaSourceAttributes = new Dictionary<MediaSourceAttributesKeys, string>();
+            var mediaStreamAttributes = new Dictionary<MediaStreamAttributeKeys, string>();
+            var mediaStreamDescriptions = new List<MediaStreamDescription>();
+
+            ReadPastId3V2Tags(
+                mpegLayer3Frame =>
+                ReadPastId3v2TagsCallback(mpegLayer3Frame, mediaStreamAttributes, mediaStreamDescriptions,
+                                          mediaSourceAttributes));
         }
 
         /// <summary>
@@ -220,51 +245,56 @@ namespace Media
         /// </param>
         protected override void GetSampleAsync(MediaStreamType mediaStreamType)
         {
-            Dictionary<MediaSampleAttributeKeys, string> emptyDict = new Dictionary<MediaSampleAttributeKeys, string>();
-            MediaStreamSample audioSample = null;
+            Debug.WriteLine("Enter GetSampleAsync");
 
-            if (this.currentFrame != null)
+            var emptyDict = new Dictionary<MediaSampleAttributeKeys, string>();
+            MediaStreamSample audioSample;
+
+            if (currentFrame != null)
             {
                 // Calculate our current position based on the stream's length
-                //// double ratio = (double)this.currentFrameStartPosition / (double)this.audioStreamLength;
-                //// TimeSpan currentPosition = new TimeSpan((long)(this.trackDuration.Ticks * ratio));
+                double ratio = currentFrameStartPosition/(double) audioStreamLength;
+                var currentPosition1 = new TimeSpan((long) (trackDuration.Ticks*ratio));
 
                 // Calculate our current position instead based on the bitrate of the stream (more accurate?)
-                double position = (double)this.currentFrameStartPosition / (double)this.currentFrame.Bitrate;
-                TimeSpan currentPosition = TimeSpan.FromSeconds(position * 8 /* bits per Byte */);
+                double position = currentFrameStartPosition/(double) currentFrame.Bitrate;
+                TimeSpan currentPosition = TimeSpan.FromSeconds(position*8 /* bits per Byte */);
+                _Position = currentPosition;
 
                 // Create a MemoryStream to hold the bytes
                 // FrameSize includes the frame header which we've already read from the previous iteration, so just copy the
                 // header, and then read the remaining bytes
-                this.currentFrame.CopyHeader(buffer);
-                int audioSampleSize = this.currentFrame.FrameSize - MpegFrame.FrameHeaderSize;
-                int c = this.audioStream.Read(buffer, MpegFrame.FrameHeaderSize, audioSampleSize);
+                currentFrame.CopyHeader(buffer);
+                int audioSampleSize = currentFrame.FrameSize - MpegFrame.FrameHeaderSize;
+                //audioStream.Seek(_headerPosition +  currentFrameStartPosition - 4, SeekOrigin.Begin);
+                int c = audioStream.Read(buffer, MpegFrame.FrameHeaderSize, audioSampleSize);
                 if (c != audioSampleSize)
                 {
                     // Ran out of bytes trying to read MP3 frame.
-                    this.currentFrame = null;
-                    audioSample = new MediaStreamSample(this.audioStreamDescription, null, 0, 0, 0, emptyDict);
-                    this.ReportGetSampleCompleted(audioSample);
+                    currentFrame = null;
+                    audioSample = new MediaStreamSample(audioStreamDescription, null, 0, 0, 0, emptyDict);
+                    ReportGetSampleCompleted(audioSample);
                     return;
                 }
 
-                this.currentFrameStartPosition += c;
-                using (MemoryStream audioFrameStream = new MemoryStream(buffer))
+                currentFrameStartPosition += c;
+                using (var audioFrameStream = new MemoryStream(buffer))
                 {
                     // Return the next sample in the stream
-                    audioSample = new MediaStreamSample(this.audioStreamDescription, audioFrameStream, 0, this.currentFrame.FrameSize, currentPosition.Ticks, emptyDict);
-                    this.ReportGetSampleCompleted(audioSample);
+                    audioSample = new MediaStreamSample(audioStreamDescription, audioFrameStream, 0,
+                                                        currentFrame.FrameSize, currentPosition.Ticks, emptyDict);
+                    ReportGetSampleCompleted(audioSample);
 
                     // Grab the next frame
-                    MpegFrame nextFrame = new MpegFrame(this.audioStream);
-                    if ( (nextFrame.Version == 1 || nextFrame.Version == 2) && nextFrame.Layer == 3)
+                    var nextFrame = new MpegFrame(audioStream);
+                    if ((nextFrame.Version == 1 || nextFrame.Version == 2) && nextFrame.Layer == 3)
                     {
-                        this.currentFrameStartPosition += MpegFrame.FrameHeaderSize;
-                        this.currentFrame = nextFrame;
+                        currentFrameStartPosition += MpegFrame.FrameHeaderSize;
+                        currentFrame = nextFrame;
                     }
                     else
                     {
-                        this.currentFrame = null;
+                        currentFrame = null;
                     }
                 }
             }
@@ -272,9 +302,11 @@ namespace Media
             {
                 // We're near the end of the file, or we got an irrecoverable error.
                 // Return a null stream which tells the MediaStreamSource & MediaElement to shut down
-                audioSample = new MediaStreamSample(this.audioStreamDescription, null, 0, 0, 0, emptyDict);
-                this.ReportGetSampleCompleted(audioSample);
+                audioSample = new MediaStreamSample(audioStreamDescription, null, 0, 0, 0, emptyDict);
+                ReportGetSampleCompleted(audioSample);
             }
+
+            Debug.WriteLine("Exit GetSampleAsync");
         }
 
         /// <summary>
@@ -284,7 +316,7 @@ namespace Media
         {
             try
             {
-                this.audioStream.Close();
+                audioStream.Close();
             }
             catch (CryptographicException)
             {
@@ -324,7 +356,7 @@ namespace Media
         /// </param>
         protected override void SeekAsync(long seekToTime)
         {
-            this.ReportSeekCompleted(seekToTime);
+            ReportSeekCompleted(seekToTime);
         }
 
         /// <summary>
@@ -346,43 +378,54 @@ namespace Media
         /// <param name="mediaStreamDescriptions">Empty dictionary for MediaStreamDescriptions</param>
         /// <param name="mediaSourceAttributes">Empty dictionary for MediaSourceAttributes</param>
         private void ReadPastId3v2TagsCallback(
-            MpegFrame mpegLayer3Frame, 
-            Dictionary<MediaStreamAttributeKeys, string> mediaStreamAttributes, 
-            List<MediaStreamDescription> mediaStreamDescriptions, 
+            MpegFrame mpegLayer3Frame,
+            Dictionary<MediaStreamAttributeKeys, string> mediaStreamAttributes,
+            List<MediaStreamDescription> mediaStreamDescriptions,
             Dictionary<MediaSourceAttributesKeys, string> mediaSourceAttributes)
         {
+            _headerPosition = audioStream.Position;
+
+            Debug.WriteLine("ReadPastId3v2TagsCallback");
+
             if (mpegLayer3Frame.FrameSize <= 0)
             {
                 throw new InvalidOperationException("MpegFrame's FrameSize cannot be negative");
             }
 
             // Initialize the Mp3 data structures used by the Media pipeline with state from the first frame.
-            WaveFormatExtensible wfx = new WaveFormatExtensible();
-            this.MpegLayer3WaveFormat = new MpegLayer3WaveFormat();
-            this.MpegLayer3WaveFormat.WaveFormatExtensible = wfx;
+            var wfx = new WaveFormatExtensible
+                          {
+                              FormatTag = 85,
+                              Channels = (short) ((mpegLayer3Frame.Channels == Channel.SingleChannel) ? 1 : 2),
+                              SamplesPerSec = mpegLayer3Frame.SamplingRate,
+                              AverageBytesPerSecond = mpegLayer3Frame.Bitrate/8,
+                              BlockAlign = 1,
+                              BitsPerSample = 0,
+                              ExtraDataSize = 12
+                          };
 
-            this.MpegLayer3WaveFormat.WaveFormatExtensible.FormatTag = 85;
-            this.MpegLayer3WaveFormat.WaveFormatExtensible.Channels = (short)((mpegLayer3Frame.Channels == Channel.SingleChannel) ? 1 : 2);
-            this.MpegLayer3WaveFormat.WaveFormatExtensible.SamplesPerSec = mpegLayer3Frame.SamplingRate;
-            this.MpegLayer3WaveFormat.WaveFormatExtensible.AverageBytesPerSecond = mpegLayer3Frame.Bitrate / 8;
-            this.MpegLayer3WaveFormat.WaveFormatExtensible.BlockAlign = 1;
-            this.MpegLayer3WaveFormat.WaveFormatExtensible.BitsPerSample = 0;
-            this.MpegLayer3WaveFormat.WaveFormatExtensible.ExtraDataSize = 12;
+            MpegLayer3WaveFormat = new MpegLayer3WaveFormat
+                                       {
+                                           WaveFormatExtensible = wfx,
+                                           Id = 1,
+                                           BitratePaddingMode = 0,
+                                           FramesPerBlock = 1,
+                                           BlockSize = (short) mpegLayer3Frame.FrameSize,
+                                           CodecDelay = 0
+                                       };
 
-            this.MpegLayer3WaveFormat.Id = 1;
-            this.MpegLayer3WaveFormat.BitratePaddingMode = 0;
-            this.MpegLayer3WaveFormat.FramesPerBlock = 1;
-            this.MpegLayer3WaveFormat.BlockSize = (short)mpegLayer3Frame.FrameSize;
-            this.MpegLayer3WaveFormat.CodecDelay = 0;
 
-            mediaStreamAttributes[MediaStreamAttributeKeys.CodecPrivateData] = this.MpegLayer3WaveFormat.ToHexString();
-            this.audioStreamDescription = new MediaStreamDescription(MediaStreamType.Audio, mediaStreamAttributes);
+            mediaStreamAttributes[MediaStreamAttributeKeys.CodecPrivateData] = MpegLayer3WaveFormat.ToHexString();
+            audioStreamDescription = new MediaStreamDescription(MediaStreamType.Audio, mediaStreamAttributes);
 
-            mediaStreamDescriptions.Add(this.audioStreamDescription);
+            mediaStreamDescriptions.Add(audioStreamDescription);
+            trackDuration = new TimeSpan(0, 0,
+                                         (int)
+                                         (audioStreamLength/
+                                          MpegLayer3WaveFormat.WaveFormatExtensible.AverageBytesPerSecond));
+            mediaSourceAttributes[MediaSourceAttributesKeys.Duration] = trackDuration.Ticks.ToString(CultureInfo.InvariantCulture);
 
-            this.trackDuration = new TimeSpan(0, 0, (int)(this.audioStreamLength / MpegLayer3WaveFormat.WaveFormatExtensible.AverageBytesPerSecond));
-            mediaSourceAttributes[MediaSourceAttributesKeys.Duration] = this.trackDuration.Ticks.ToString(CultureInfo.InvariantCulture);
-            if (this.audioStream.CanSeek)
+            if (audioStream.CanSeek)
             {
                 mediaSourceAttributes[MediaSourceAttributesKeys.CanSeek] = "1";
             }
@@ -393,10 +436,10 @@ namespace Media
 
             // Report that the Mp3MediaStreamSource has finished initializing its internal state and can now
             // pass in Mp3 Samples.
-            this.ReportOpenMediaCompleted(mediaSourceAttributes, mediaStreamDescriptions);
+            ReportOpenMediaCompleted(mediaSourceAttributes, mediaStreamDescriptions);
 
-            this.currentFrame = mpegLayer3Frame;
-            this.currentFrameStartPosition = MpegFrame.FrameHeaderSize;
+            currentFrame = mpegLayer3Frame;
+            currentFrameStartPosition = MpegFrame.FrameHeaderSize;
         }
     }
 }
